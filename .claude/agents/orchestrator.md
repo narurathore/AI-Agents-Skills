@@ -37,13 +37,15 @@ Create this file and its parent directory if they do not exist.
 
 ```
 @orchestrator                          → open dashboard (default)
-@orchestrator add <path>               → register a new project
+@orchestrator add <path>               → register a project or monorepo
 @orchestrator remove <name-or-number>  → deregister a project
 @orchestrator refresh                  → re-read all project files and redisplay
 ```
 
 After the dashboard loads the user types a project number to drill in.
 After drilling in the user types a task number to get a session prompt.
+For multi-module projects the user can also type a module name to filter tasks
+to that module (e.g. `:feature-login`).
 
 ---
 
@@ -54,17 +56,37 @@ After drilling in the user types a task number to get a session prompt.
 
 _Last updated: YYYY-MM-DD_
 
-| # | Name | Slug | Root | Type | Status |
-|---|------|------|------|------|--------|
-| 1 | MyApp | my-app | /abs/path/to/project | android | active |
-| 2 | LibXYZ | lib-xyz | /abs/path/to/libxyz | android | active |
+| # | Name | Slug | Root | Type | Structure | Status |
+|---|------|------|------|------|-----------|--------|
+| 1 | MyApp | my-app | /abs/path/to/project | android | multi-module | active |
+| 2 | LibXYZ | lib-xyz | /abs/path/to/libxyz | android | single | active |
+| 3 | Platform | platform | /abs/path/to/platform | android | monorepo | active |
+
+## Modules
+
+<!-- Auto-detected from settings.gradle.kts. Update manually if needed. -->
+
+### MyApp (#1)
+:app, :feature-login, :feature-profile, :shared, :ui-toolkit, :core-network
+
+### Platform (#3) — monorepo subprojects
+- consumer-app → /abs/path/to/platform/consumer-app
+- driver-app   → /abs/path/to/platform/driver-app
+- shared-lib   → /abs/path/to/platform/shared-lib
 
 ## Notes
 <!-- free-form notes about any project -->
 ```
 
 **Type values:** `android` · `kmp` · `web` · `other`
-**Status values:** `active` · `paused` · `archived`
+**Structure values:**
+- `single` — one Gradle module (`:app` only)
+- `multi-module` — one `settings.gradle.kts` with multiple `:feature-*` / `:shared` / `:core-*` modules
+- `monorepo` — a parent directory containing independent subprojects, each with their own `settings.gradle.kts`
+
+For `monorepo` projects, each subproject is listed in the **Modules** section
+with its own path. The orchestrator treats them as one registry entry but drills
+into each subproject independently when showing tasks.
 
 ---
 
@@ -79,17 +101,24 @@ If it does not exist, create it with the template above and tell the user:
 
 ### Step 2 — Load live status for each project
 
-For each `active` project in the registry, read these files if they exist:
+For each `active` project in the registry, read these files:
 
+**Single and multi-module projects** — read from root:
 - `<root>/Progress.md` — extract: **In progress** items, **Blocked** items
-- `<root>/plan/index.md` — extract: rows with status `in-progress` or `draft`
-- `<root>/specs/features/` — list subdirectories; for each read `spec.md`
-  front-matter and extract `**Status:**` line
-- `<root>/specs/bugs/` — same
+- `<root>/plan/index.md` — extract rows with status `in-progress` or `draft`
+- `<root>/specs/features/*/spec.md` and `<root>/specs/bugs/*/spec.md` — extract `**Status:**`
+
+**Monorepo projects** — read from each subproject path listed in the registry's
+Modules section:
+- `<subproject>/Progress.md`
+- `<subproject>/plan/index.md`
+- `<subproject>/specs/features/*/spec.md`
+
+Aggregate counts across all subprojects for the dashboard total.
 
 Derive a **pending task count** per project:
 - Count: in-progress plan items + draft plan items + draft/approved specs +
-  blocked Progress.md items
+  blocked Progress.md items (across all subprojects for monorepos)
 
 ### Step 3 — Render the dashboard
 
@@ -100,11 +129,12 @@ Print:
 ║         ORCHESTRATOR DASHBOARD           ║
 ╚══════════════════════════════════════════╝
 
-  #   Project            Type       Status    Pending
-  ─   ───────────────    ────────   ──────    ───────
-  1   MyApp              android    active    3 tasks
-  2   LibXYZ             android    active    0 tasks
-  3   WebApp             web        paused    1 task
+  #   Project       Type       Structure      Status    Pending
+  ─   ───────────   ────────   ───────────    ──────    ───────
+  1   MyApp         android    multi-module   active    3 tasks  (6 modules)
+  2   LibXYZ        android    single         active    0 tasks
+  3   Platform      android    monorepo       active    5 tasks  (3 apps)
+  4   WebApp        web        single         paused    1 task
 
   [add] Register a new project
   [?]   Help
@@ -120,63 +150,116 @@ Wait for user input.
 
 Triggered when the user enters a project number.
 
-### Step 1 — Identify the project
+### Step 1 — Identify the project and its structure
 
-Look up the project row in the registry by the number entered.
+Look up the project row in the registry. Check its `Structure` field:
+- `single` / `multi-module` → single root, proceed to Step 2A
+- `monorepo` → multiple subprojects, proceed to Step 2B
 
-### Step 2 — Read project files
+### Step 2A — Read files (single / multi-module)
 
 Read from the project root:
 - `Progress.md` (full file)
 - `plan/index.md` (full file)
 - `specs/features/*/spec.md` and `specs/bugs/*/spec.md` (status + title only)
 - `CLAUDE.md` (first 20 lines — for architecture summary)
-- `git -C <root> log --oneline -5` — last 5 commits
-- `git -C <root> branch --show-current` — current branch
+- `git -C <root> log --oneline -5`
+- `git -C <root> branch --show-current`
+
+**For multi-module projects**, also read the module list from the registry's
+Modules section. For each task in `plan/index.md`, try to detect which module
+it affects by:
+1. Checking if the plan file path contains a module name (e.g.
+   `plan/features/login-flow.md` → look inside for `:feature-login` references)
+2. Reading the first 5 lines of `plan/features/<slug>.md` for a `**Module:**`
+   field if present
+3. If undetectable, leave module as `—`
+
+### Step 2B — Read files (monorepo)
+
+Read the subproject list from the registry's Modules section.
+For each subproject, read (if exists):
+- `<subproject>/Progress.md`
+- `<subproject>/plan/index.md`
+- `<subproject>/specs/features/*/spec.md`
+- `<subproject>/git -C <subproject> branch --show-current`
+
+Tag every task with the subproject name it came from.
 
 ### Step 3 — Build the task list
 
-Collect all actionable items into a numbered list. Task types:
+Collect all actionable items into a numbered list. Tag each item with its
+module or subproject in square brackets.
 
 | Tag | Source | Condition |
 |-----|--------|-----------|
-| `[IN PROGRESS]` | Progress.md → In progress section | Any item listed there |
-| `[BLOCKED]` | Progress.md → Blocked section | Any item listed there |
+| `[IN PROGRESS]` | Progress.md → In progress section | Any item listed |
+| `[BLOCKED]` | Progress.md → Blocked section | Any item listed |
 | `[SPEC: draft]` | specs/*/spec.md | Status = draft |
-| `[SPEC: approved]` | specs/*/spec.md | Status = approved — ready to implement |
+| `[SPEC: approved]` | specs/*/spec.md | Status = approved |
 | `[PLAN: draft]` | plan/index.md | Status = draft |
 | `[PLAN: in-progress]` | plan/index.md | Status = in-progress |
 
+For multi-module and monorepo projects, each row also shows the module/subproject:
+```
+3  [SPEC: approved]  dark-mode  (:feature-settings)  — spec approved, ready to implement
+```
+
 ### Step 4 — Render the project view
 
-Print:
+**Single / multi-module:**
 
 ```
-╔══════════════════════════════════════════╗
-║  MyApp  ·  /Users/nsingh/dev/myapp       ║
-╚══════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════╗
+║  MyApp  ·  /Users/nsingh/dev/myapp  ·  multi-module  ║
+╚══════════════════════════════════════════════════════╝
 
-  Branch:  user-profile-sdd
-  Recent:  feat(vm): implement user profile ViewModel (2 days ago)
-           test(vm): add AC tests for user profile (3 days ago)
+  Branch:   user-profile-sdd
+  Recent:   feat(vm): implement user profile ViewModel (2 days ago)
+            test(vm): add AC tests for user profile (3 days ago)
+
+  Modules:  :app  :feature-login  :feature-profile  :shared  :ui-toolkit
+            (filter by module: type a module name, e.g. :feature-login)
 
   Architecture: Clean MVVM · Compose · KMP · Hilt
 
-  ── Pending tasks ──────────────────────────────────────
+  ── Pending tasks ────────────────────────────────────────────
 
-  1  [IN PROGRESS]   user-profile — Phase 2/4: ViewModel layer
-  2  [SPEC: draft]   user-settings — spec written, needs your review
-  3  [SPEC: approved] dark-mode — spec approved, ready to implement
-  4  [PLAN: draft]   onboarding-redesign — plan written, not started
-  5  [BLOCKED]       push-notifications — waiting on backend contract
+  1  [IN PROGRESS]    user-profile (:feature-profile)   Phase 2/4: ViewModel layer
+  2  [SPEC: draft]    user-settings (:feature-settings)  spec written, needs review
+  3  [SPEC: approved] dark-mode (:feature-settings)      ready to implement
+  4  [PLAN: draft]    onboarding-redesign (:feature-onboarding)  not started
+  5  [BLOCKED]        push-notifications (:core-push)    waiting on backend contract
 
-  ── No blocked items ───────────────────────────────────
+  Enter task number · module name to filter · [b] back · [r] refresh
+```
 
-  Enter a task number to get a session prompt.
-  [b] Back to dashboard  [r] Refresh
+**Monorepo:**
+
+```
+╔══════════════════════════════════════════════════════╗
+║  Platform  ·  /Users/nsingh/dev/platform  ·  monorepo ║
+╚══════════════════════════════════════════════════════╝
+
+  Subprojects:
+    consumer-app  →  /Users/nsingh/dev/platform/consumer-app
+    driver-app    →  /Users/nsingh/dev/platform/driver-app
+    shared-lib    →  /Users/nsingh/dev/platform/shared-lib
+
+  ── Pending tasks (all subprojects) ─────────────────────────
+
+  1  [IN PROGRESS]    user-profile [consumer-app]     Phase 2/4: ViewModel layer
+  2  [SPEC: approved] driver-onboarding [driver-app]  ready to implement
+  3  [PLAN: draft]    auth-refresh [shared-lib]        plan written, not started
+
+  Enter task number · subproject name to filter · [b] back · [r] refresh
 ```
 
 Wait for user input.
+
+**Module / subproject filter:** if the user types a module name (e.g.
+`:feature-profile` or `consumer-app`) instead of a number, re-render the task
+list showing only tasks for that module/subproject.
 
 ---
 
@@ -202,7 +285,12 @@ Map the task type to the right skill or agent:
 ### Step 2 — Read the relevant spec or plan file
 
 For `[SPEC: approved]` or `[IN PROGRESS]` tasks, read the full spec and plan
-file to extract: spec_slug, current phase, branch name, AC items, open questions.
+file to extract: spec_slug, current phase, branch name, AC items, open questions,
+and **affected module(s)** (from the plan file's `**Module:**` field or inferred
+from the module tag on the task row).
+
+For monorepo tasks, also record the **subproject root path** — this is the
+`cd` target for the new session, not the monorepo root.
 
 ### Step 3 — Generate the session prompt
 
@@ -239,17 +327,20 @@ Print:
 ```
 I want to implement a feature using spec-driven development.
 
-Project root: <abs_path>
+Project root: <abs_path>                   ← subproject root for monorepos
 Spec: specs/features/<slug>/spec.md  (status: approved)
 Plan: plan/features/<slug>.md
+Module: <:module-name or "—">              ← primary Gradle module affected
 
 Read .agents/skills/android-sdd/SKILL.md and follow MODE: IMPLEMENT with:
   spec_slug: <slug>
   spec_type: feature
   project_root: <abs_path>
 
-Start from Step B1 (load and validate the spec). The branch `<branch>` may
-already exist — check it out before creating a new one.
+The primary Gradle module for this feature is `<:module-name>`. Run
+`assembleDebug` and `testDebugUnitTest` against that module specifically.
+Start from Step B1. The branch `<branch>` may already exist — check it out
+before creating a new one.
 ```
 
 ---
@@ -259,9 +350,10 @@ already exist — check it out before creating a new one.
 ```
 I want to resume an in-progress implementation.
 
-Project root: <abs_path>
+Project root: <abs_path>                   ← subproject root for monorepos
 Spec: specs/features/<slug>/spec.md  (status: in-progress)
 Plan: plan/features/<slug>.md
+Module: <:module-name or "—">
 Current branch: <branch>
 Last completed phase: <N> — <phase title>
 Next phase: <N+1> — <phase title>
@@ -269,6 +361,7 @@ Next phase: <N+1> — <phase title>
 Read .agents/skills/android-sdd/SKILL.md and follow MODE: IMPLEMENT.
 The spec is already approved. The plan already exists. Start from Phase <N+1>
 (Step B5) — do not re-create the plan or branch. Check out `<branch>` first.
+The primary Gradle module is `<:module-name>`.
 ```
 
 ---
@@ -345,49 +438,108 @@ uses Clean MVVM with Hilt and Jetpack Compose. Architecture context is at:
 
 Triggered by `@orchestrator add <path>`.
 
-### Steps
+### Step 1 — Verify and classify the path
 
-1. Verify the path exists: `ls <path>/build.gradle.kts` or `ls <path>/build.gradle`
-   (or any `.kt` files). If not found, tell the user and stop.
+Check what the path contains:
 
-2. Derive slug: lowercase folder name, hyphenated.
+```bash
+# Does it have its own settings.gradle.kts?
+ls <path>/settings.gradle.kts 2>/dev/null
 
-3. Detect project type:
-   - `android` if `build.gradle.kts` has `com.android.application` or
-     `com.android.library`
-   - `kmp` if `kotlin("multiplatform")` is present
-   - `web` if `package.json` exists
-   - `other` otherwise
+# Does it contain subdirs that each have settings.gradle.kts? (monorepo)
+find <path> -maxdepth 2 -name "settings.gradle.kts" | head -10
+```
 
-4. Ask the user to confirm:
-   ```
-   About to register:
-     Name:  <folder name>
-     Slug:  <slug>
-     Root:  <abs path>
-     Type:  <type>
-   
-   Confirm? (yes / adjust name: <new name> / cancel)
-   ```
-   Wait.
+**Case A — single/multi-module project:** `<path>/settings.gradle.kts` exists.
+Proceed to Step 2.
 
-5. Append a new row to the registry table. Increment `#`.
+**Case B — monorepo:** `<path>` itself has no `settings.gradle.kts` but
+subdirectories do. Proceed to Step 2M.
 
-6. Update `_Last updated:` date.
+**Case C — neither:** tell the user and stop.
 
-7. Check whether `Progress.md`, `plan/`, and `specs/` exist.
-   If any are missing:
-   ```
-   Note: this project is missing Progress.md / plan/ / specs/.
-   Run @android-architect to index it — it will scaffold the missing
-   structure automatically for new projects.
-   ```
+### Step 2 — Single / multi-module detection
 
-8. Confirm:
-   ```
-   ✓ Registered: <Name> as #<N>
-   Type @orchestrator to return to the dashboard.
-   ```
+```bash
+# Read module list from settings.gradle.kts
+grep -E "include\(|include '" <path>/settings.gradle.kts
+```
+
+Collect the list of included modules (e.g. `:app`, `:feature-login`, `:shared`).
+
+- **Single** — only one module included (or just `:app`).
+- **Multi-module** — more than one module.
+
+Detect type:
+- `android` if any `build.gradle.kts` contains `com.android.application` or `com.android.library`
+- `kmp` if `kotlin("multiplatform")` is present anywhere
+- `web` if `package.json` exists at root
+- `other` otherwise
+
+Show the user a confirmation prompt:
+
+```
+About to register:
+  Name:       <folder name>
+  Slug:       <slug>
+  Root:       <abs path>
+  Type:       android
+  Structure:  multi-module
+  Modules:    :app, :feature-login, :feature-profile, :shared, :ui-toolkit
+
+Confirm? (yes / adjust name: <new name> / cancel)
+```
+
+Wait. On confirm:
+- Append the row to the registry table with `Structure` = `single` or `multi-module`.
+- Write the module list under `## Modules` → `### <Name> (#<N>)`.
+- Check for `Progress.md`, `plan/`, `specs/` — warn if missing.
+- Confirm: `✓ Registered <Name> as #<N>`
+
+### Step 2M — Monorepo detection
+
+List subdirectories that contain `settings.gradle.kts`:
+
+```bash
+find <path> -maxdepth 2 -name "settings.gradle.kts" -not -path "<path>/settings.gradle.kts" \
+  | xargs -I{} dirname {}
+```
+
+Show the user:
+
+```
+Detected monorepo at <path> with subprojects:
+  - consumer-app  →  <path>/consumer-app
+  - driver-app    →  <path>/driver-app
+  - shared-lib    →  <path>/shared-lib
+
+Register as:
+  A) One monorepo entry (dashboard shows all subprojects together)
+  B) Separate entries (each subproject appears as its own project in the dashboard)
+  C) Cancel
+```
+
+Wait.
+
+- **A** → append one row with `Structure = monorepo`. Write the subproject list
+  under `## Modules` → `### <Name> (#<N>) — monorepo subprojects`.
+  Check each subproject for `Progress.md` / `plan/` / `specs/` — warn per subproject.
+- **B** → run Steps 2 for each subproject path in sequence, registering each
+  as an independent entry. After all are registered, confirm the full list.
+- **C** → stop.
+
+### Step 3 — Final confirmation
+
+```
+✓ Registered: <Name> as #<N>  [structure: <structure>]
+  Modules detected: <count>
+  Progress.md: ✓ / ⚠ missing
+  plan/:        ✓ / ⚠ missing
+  specs/:       ✓ / ⚠ missing
+
+If any are missing, run @android-architect on the project root to scaffold them.
+Type @orchestrator to return to the dashboard.
+```
 
 ---
 
