@@ -191,18 +191,18 @@ Tag every task with the subproject name it came from.
 Collect all actionable items into a numbered list. Tag each item with its
 module or subproject in square brackets.
 
-| Tag | Source | Condition |
-|-----|--------|-----------|
-| `[IN PROGRESS]` | Progress.md → In progress section | Any item listed |
-| `[BLOCKED]` | Progress.md → Blocked section | Any item listed |
-| `[SPEC: draft]` | specs/*/spec.md | Status = draft |
-| `[SPEC: approved]` | specs/*/spec.md | Status = approved |
-| `[PLAN: draft]` | plan/index.md | Status = draft |
-| `[PLAN: in-progress]` | plan/index.md | Status = in-progress |
+| Tag | Source | Condition | Approach |
+|-----|--------|-----------|----------|
+| `[IN PROGRESS]` | Progress.md → In progress section | Any item listed | `/android-sdd IMPLEMENT` (resume) |
+| `[BLOCKED]` | Progress.md → Blocked section | Any item listed | — unblock first |
+| `[SPEC: draft]` | specs/*/spec.md | Status = draft | review manually |
+| `[SPEC: approved]` | specs/*/spec.md | Status = approved | `/android-sdd IMPLEMENT` |
+| `[PLAN: draft]` | plan/index.md | Status = draft | `/android-sdd SPEC` |
+| `[PLAN: in-progress]` | plan/index.md | Status = in-progress | `/android-sdd IMPLEMENT` (resume) |
 
-For multi-module and monorepo projects, each row also shows the module/subproject:
+Each row shows the module/subproject and the recommended approach:
 ```
-3  [SPEC: approved]  dark-mode  (:feature-settings)  — spec approved, ready to implement
+3  [SPEC: approved]  dark-mode  (:feature-settings)  → /android-sdd IMPLEMENT
 ```
 
 ### Step 4 — Render the project view
@@ -225,11 +225,11 @@ For multi-module and monorepo projects, each row also shows the module/subprojec
 
   ── Pending tasks ────────────────────────────────────────────
 
-  1  [IN PROGRESS]    user-profile (:feature-profile)   Phase 2/4: ViewModel layer
-  2  [SPEC: draft]    user-settings (:feature-settings)  spec written, needs review
-  3  [SPEC: approved] dark-mode (:feature-settings)      ready to implement
-  4  [PLAN: draft]    onboarding-redesign (:feature-onboarding)  not started
-  5  [BLOCKED]        push-notifications (:core-push)    waiting on backend contract
+  1  [IN PROGRESS]    user-profile (:feature-profile)          Phase 2/4  → /android-sdd IMPLEMENT
+  2  [SPEC: draft]    user-settings (:feature-settings)                   → review manually
+  3  [SPEC: approved] dark-mode (:feature-settings)                       → /android-sdd IMPLEMENT
+  4  [PLAN: draft]    onboarding-redesign (:feature-onboarding)           → /android-sdd SPEC
+  5  [BLOCKED]        push-notifications (:core-push)    waiting on backend contract  → unblock first
 
   ── Commands ──────────────────────────────────────────────────
   [b]        Back to dashboard
@@ -254,9 +254,9 @@ For multi-module and monorepo projects, each row also shows the module/subprojec
 
   ── Pending tasks (all subprojects) ─────────────────────────
 
-  1  [IN PROGRESS]    user-profile [consumer-app]     Phase 2/4: ViewModel layer
-  2  [SPEC: approved] driver-onboarding [driver-app]  ready to implement
-  3  [PLAN: draft]    auth-refresh [shared-lib]        plan written, not started
+  1  [IN PROGRESS]    user-profile [consumer-app]     Phase 2/4  → /android-sdd IMPLEMENT
+  2  [SPEC: approved] driver-onboarding [driver-app]             → /android-sdd IMPLEMENT
+  3  [PLAN: draft]    auth-refresh [shared-lib]                  → /android-sdd SPEC
 
   ── Commands ──────────────────────────────────────────────────
   [b]        Back to dashboard
@@ -353,6 +353,10 @@ The primary Gradle module for this feature is `<:module-name>`. Run
 `assembleDebug` and `testDebugUnitTest` against that module specifically.
 Start from Step B1. The branch `<branch>` may already exist — check it out
 before creating a new one.
+
+After each phase completes: update the phase status in plan/features/<slug>.md,
+update the row status in plan/index.md, and update Progress.md before moving
+to the next phase.
 ```
 
 ---
@@ -374,6 +378,10 @@ Read .agents/skills/android-sdd/SKILL.md and follow MODE: IMPLEMENT.
 The spec is already approved. The plan already exists. Start from Phase <N+1>
 (Step B5) — do not re-create the plan or branch. Check out `<branch>` first.
 The primary Gradle module is `<:module-name>`.
+
+After each phase completes: update the phase status in plan/features/<slug>.md,
+update the row status in plan/index.md, and update Progress.md before moving
+to the next phase.
 ```
 
 ---
@@ -414,6 +422,9 @@ Read .agents/skills/android-sdd/SKILL.md and follow MODE: SPEC with:
   project_root: <abs_path>
 
 After I approve the spec, call this skill again with MODE: IMPLEMENT.
+During IMPLEMENT: after each phase completes, update the phase status in
+plan/features/<slug>.md, update the row in plan/index.md, and update
+Progress.md before moving to the next phase.
 ```
 
 ---
