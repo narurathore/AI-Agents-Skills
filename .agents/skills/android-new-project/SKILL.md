@@ -39,6 +39,12 @@ separate repository publishable as a Gradle dependency.
 │   ├── src/commonTest/kotlin/          # KMP unit tests
 │   ├── src/androidMain/kotlin/         # Android actuals
 │   └── src/androidTest/kotlin/
+├── core-analytics/                     # Firebase Analytics wrapper
+│   └── src/main/kotlin/.../core/analytics/
+│       ├── AnalyticsEvent.kt          # Sealed class of all trackable events
+│       ├── AnalyticsTracker.kt        # Interface (injected into ViewModels)
+│       ├── FirebaseAnalyticsTracker.kt
+│       └── di/AnalyticsModule.kt
 ├── feature/<name>/                     # One module per feature
 │   ├── src/main/kotlin/.../
 │   │   ├── <Name>Screen.kt            # Compose screen
@@ -105,6 +111,8 @@ turbine = "1.2.0"
 mockk = "1.14.0"
 junit5 = "5.11.4"
 kotest = "5.9.1"
+firebase-bom = "33.7.0"
+google-services = "4.4.2"
 
 [libraries]
 # Compose BOM — import in each module, no version needed after this
@@ -134,6 +142,9 @@ mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
 junit5-api = { group = "org.junit.jupiter", name = "junit-jupiter-api", version.ref = "junit5" }
 junit5-engine = { group = "org.junit.jupiter", name = "junit-jupiter-engine", version.ref = "junit5" }
 
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebase-bom" }
+firebase-analytics = { group = "com.google.firebase", name = "firebase-analytics" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
@@ -143,6 +154,7 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 ksp = { id = "com.google.devtools.ksp", version = "2.1.0-1.0.29" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+google-services = { id = "com.google.gms.google-services", version.ref = "google-services" }
 ```
 
 3. Create convention plugins in `build-logic/` so every module stays DRY:
@@ -532,7 +544,258 @@ object DispatcherModule {
 
 ---
 
-### Step 7 — Non-negotiables (apply to every PR in this project)
+### Step 7 — Analytics integration (Google Firebase Analytics)
+
+#### 7.1 — Prerequisites
+
+1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com).
+2. Register the Android app using the `applicationId` from `app/build.gradle.kts`.
+3. Download `google-services.json` and place it at `app/google-services.json`.
+   > `google-services.json` contains no secrets — it is safe to commit.
+
+#### 7.2 — Apply the Google Services plugin
+
+`app/build.gradle.kts`:
+
+```kotlin
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.google.services)    // ← add
+}
+```
+
+#### 7.3 — Scaffold `:core-analytics`
+
+Add to `settings.gradle.kts`:
+
+```kotlin
+include(":core-analytics")
+```
+
+**`core-analytics/build.gradle.kts`:**
+
+```kotlin
+plugins {
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.ksp)
+}
+
+android {
+    namespace = "<package>.core.analytics"
+    compileSdk = libs.versions.compileSdk.get().toInt()
+    defaultConfig { minSdk = libs.versions.minSdk.get().toInt() }
+}
+
+dependencies {
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.analytics)
+}
+```
+
+#### 7.4 — Analytics domain model
+
+**`AnalyticsEvent.kt`** — sealed class; every trackable event is a subtype:
+
+```kotlin
+sealed class AnalyticsEvent {
+    abstract val name: String
+    abstract val params: Map<String, Any>
+
+    data class ScreenView(
+        val screenName: String,
+        val screenClass: String,
+    ) : AnalyticsEvent() {
+        override val name = "screen_view"
+        override val params = mapOf(
+            "screen_name" to screenName,
+            "screen_class" to screenClass,
+        )
+    }
+
+    data class ButtonClick(
+        val buttonName: String,
+        val screenName: String,
+    ) : AnalyticsEvent() {
+        override val name = "button_click"
+        override val params = mapOf(
+            "button_name" to buttonName,
+            "screen_name" to screenName,
+        )
+    }
+
+    data class ErrorShown(
+        val errorType: String,
+        val screenName: String,
+        val message: String = "",
+    ) : AnalyticsEvent() {
+        override val name = "error_shown"
+        override val params = mapOf(
+            "error_type" to errorType,
+            "screen_name" to screenName,
+            "message" to message,
+        )
+    }
+}
+```
+
+**`AnalyticsTracker.kt`** — interface injected into ViewModels for testability:
+
+```kotlin
+interface AnalyticsTracker {
+    fun track(event: AnalyticsEvent)
+    fun setUserId(userId: String?)
+    fun setUserProperty(key: String, value: String?)
+}
+```
+
+#### 7.5 — Firebase implementation
+
+**`FirebaseAnalyticsTracker.kt`:**
+
+```kotlin
+class FirebaseAnalyticsTracker @Inject constructor(
+    private val firebaseAnalytics: FirebaseAnalytics,
+) : AnalyticsTracker {
+
+    override fun track(event: AnalyticsEvent) {
+        val bundle = Bundle().apply {
+            event.params.forEach { (key, value) ->
+                when (value) {
+                    is String  -> putString(key, value)
+                    is Long    -> putLong(key, value)
+                    is Double  -> putDouble(key, value)
+                    is Int     -> putInt(key, value)
+                    is Boolean -> putBoolean(key, value)
+                }
+            }
+        }
+        firebaseAnalytics.logEvent(event.name, bundle)
+    }
+
+    override fun setUserId(userId: String?) {
+        firebaseAnalytics.setUserId(userId)
+    }
+
+    override fun setUserProperty(key: String, value: String?) {
+        firebaseAnalytics.setUserProperty(key, value)
+    }
+}
+```
+
+#### 7.6 — Hilt module
+
+**`di/AnalyticsModule.kt`:**
+
+```kotlin
+@Module
+@InstallIn(SingletonComponent::class)
+object AnalyticsModule {
+
+    @Provides
+    @Singleton
+    fun provideFirebaseAnalytics(
+        @ApplicationContext context: Context,
+    ): FirebaseAnalytics = FirebaseAnalytics.getInstance(context)
+
+    @Provides
+    @Singleton
+    fun provideAnalyticsTracker(
+        impl: FirebaseAnalyticsTracker,
+    ): AnalyticsTracker = impl
+}
+```
+
+#### 7.7 — Usage in a ViewModel
+
+Add `:core-analytics` as a dependency in any feature module, then inject:
+
+```kotlin
+// feature/<name>/build.gradle.kts
+dependencies {
+    implementation(project(":core-analytics"))
+}
+```
+
+```kotlin
+@HiltViewModel
+class <Name>ViewModel @Inject constructor(
+    private val get<Name>UseCase: Get<Name>UseCase,
+    private val analytics: AnalyticsTracker,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) : ViewModel() {
+
+    init {
+        analytics.track(
+            AnalyticsEvent.ScreenView(
+                screenName = "<FeatureName>",
+                screenClass = "<Name>ViewModel",
+            )
+        )
+        load()
+    }
+
+    fun onRetryClicked() {
+        analytics.track(
+            AnalyticsEvent.ButtonClick(
+                buttonName = "retry",
+                screenName = "<FeatureName>",
+            )
+        )
+        load()
+    }
+}
+```
+
+#### 7.8 — Testing pattern
+
+Use `mockk(relaxed = true)` — no Firebase SDK needed in unit tests:
+
+```kotlin
+@ExtendWith(CoroutineTestExtension::class)
+class <Name>ViewModelTest {
+
+    private val get<Name>UseCase: Get<Name>UseCase = mockk()
+    private val analytics: AnalyticsTracker = mockk(relaxed = true)
+
+    @Test
+    fun `tracks screen_view on init`() = runTest {
+        coEvery { get<Name>UseCase() } returns Result.success(emptyList())
+        <Name>ViewModel(get<Name>UseCase, analytics, UnconfinedTestDispatcher())
+
+        verify {
+            analytics.track(match {
+                it is AnalyticsEvent.ScreenView && it.screenName == "<FeatureName>"
+            })
+        }
+    }
+
+    @Test
+    fun `tracks button_click when retry pressed`() = runTest {
+        coEvery { get<Name>UseCase() } returns Result.failure(Exception("error"))
+        val viewModel = <Name>ViewModel(get<Name>UseCase, analytics, UnconfinedTestDispatcher())
+
+        viewModel.onRetryClicked()
+
+        verify {
+            analytics.track(match {
+                it is AnalyticsEvent.ButtonClick && it.buttonName == "retry"
+            })
+        }
+    }
+}
+```
+
+---
+
+### Step 8 — Non-negotiables (apply to every PR in this project)
 
 - No business logic in `@Composable` functions — only in ViewModels or UseCases.
 - No `GlobalScope`. Always `viewModelScope` or `lifecycleScope` or injected `CoroutineScope`.
@@ -545,10 +808,15 @@ object DispatcherModule {
 - Every new `:ui-toolkit` component must have Compose UI tests.
 - Test tags defined in a constants object — never inline strings in test assertions.
 - `shared/domain/` must have zero Android imports.
+- Every screen view must fire `AnalyticsEvent.ScreenView` on ViewModel init.
+- Every user action (button tap, form submit, retry) must fire an `AnalyticsEvent`.
+- Never call `FirebaseAnalytics` directly from ViewModels or Composables — always inject `AnalyticsTracker`.
+- Never hardcode event names as raw strings — always add a new subtype to `AnalyticsEvent`.
+- Every ViewModel test must verify analytics calls using `mockk(relaxed = true)`.
 
 ---
 
-### Step 8 — Write CLAUDE.md at the project root
+### Step 9 — Write CLAUDE.md at the project root
 
 Create `CLAUDE.md` at the project root. This file is auto-loaded by Claude Code
 in every session, ensuring all agents follow the same architecture without being
@@ -564,7 +832,8 @@ Clean layered architecture with MVVM, Jetpack Compose, Kotlin Multiplatform.
 - `shared/` — KMP. All business logic. Zero Android imports in `domain/`.
 - `feature/<name>/` — One module per feature. Compose UI + ViewModel only.
 - `app/` — DI wiring, navigation host, entry point only.
-- `ui-toolkit` — local module (`:ui-toolkit`) inside this project. Never a separate dependency.
+- `:ui-toolkit` — local design system module. Never a separate dependency.
+- `:core-analytics` — Google Firebase Analytics wrapper. All event tracking goes through `AnalyticsTracker`.
 
 ### Layer rules
 - `domain/` — Pure Kotlin. Repository interfaces only. No implementations.
@@ -579,6 +848,14 @@ Clean layered architecture with MVVM, Jetpack Compose, Kotlin Multiplatform.
 - No hardcoded strings — use string resources.
 - No hardcoded colors or dimensions — use design tokens from `:ui-toolkit`.
 - `shared/domain/` must have zero Android imports.
+- Never call `FirebaseAnalytics` directly — always inject `AnalyticsTracker`.
+- Never hardcode analytics event names — always use `AnalyticsEvent` subtypes.
+
+## Analytics
+- Every screen view fires `AnalyticsEvent.ScreenView` in ViewModel init.
+- Every user action fires the appropriate `AnalyticsEvent` subtype.
+- New events = new subtype in `core-analytics/AnalyticsEvent.kt`.
+- Unit tests mock `AnalyticsTracker` with `mockk(relaxed = true)`.
 
 ## Testing requirements
 - Every screen: Compose UI tests for all UiState branches + corner cases.
@@ -600,7 +877,7 @@ Use `specs/template.md` as the base. Get spec approved before writing code.
 
 ---
 
-### Step 9 — Create Progress.md
+### Step 10 — Create Progress.md
 
 Create `Progress.md` at the project root:
 
@@ -631,7 +908,7 @@ Create `Progress.md` at the project root:
 
 ---
 
-### Step 10 — Create plan/ structure
+### Step 11 — Create plan/ structure
 
 ```
 plan/
@@ -693,7 +970,7 @@ _Copy Phase 1 block for each additional phase._
 
 ---
 
-### Step 11 — Create specs/ structure
+### Step 12 — Create specs/ structure
 
 ```
 specs/
