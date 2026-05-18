@@ -39,6 +39,12 @@ separate repository publishable as a Gradle dependency.
 │   ├── src/commonTest/kotlin/          # KMP unit tests
 │   ├── src/androidMain/kotlin/         # Android actuals
 │   └── src/androidTest/kotlin/
+├── core-network/                       # Retrofit + OkHttp + Hilt wiring
+│   └── src/main/kotlin/.../core/network/
+│       ├── ApiService.kt              # Retrofit service interface
+│       ├── NetworkResponse.kt         # Sealed result wrapper
+│       ├── AuthInterceptor.kt         # OkHttp request interceptor
+│       └── di/NetworkModule.kt        # Hilt: OkHttp, Retrofit, ApiService
 ├── core-analytics/                     # Firebase Analytics wrapper
 │   └── src/main/kotlin/.../core/analytics/
 │       ├── AnalyticsEvent.kt          # Sealed class of all trackable events
@@ -113,6 +119,9 @@ junit5 = "5.11.4"
 kotest = "5.9.1"
 firebase-bom = "33.7.0"
 google-services = "4.4.2"
+retrofit = "2.11.0"
+okhttp = "4.12.0"
+moshi = "1.15.1"
 
 [libraries]
 # Compose BOM — import in each module, no version needed after this
@@ -144,6 +153,15 @@ junit5-engine = { group = "org.junit.jupiter", name = "junit-jupiter-engine", ve
 
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebase-bom" }
 firebase-analytics = { group = "com.google.firebase", name = "firebase-analytics" }
+
+retrofit-core = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = "retrofit" }
+retrofit-moshi = { group = "com.squareup.retrofit2", name = "converter-moshi", version.ref = "retrofit" }
+okhttp-bom = { group = "com.squareup.okhttp3", name = "okhttp-bom", version.ref = "okhttp" }
+okhttp-core = { group = "com.squareup.okhttp3", name = "okhttp" }
+okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor" }
+moshi-core = { group = "com.squareup.moshi", name = "moshi", version.ref = "moshi" }
+moshi-kotlin = { group = "com.squareup.moshi", name = "moshi-kotlin", version.ref = "moshi" }
+moshi-codegen = { group = "com.squareup.moshi", name = "moshi-kotlin-codegen", version.ref = "moshi" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -544,16 +562,274 @@ object DispatcherModule {
 
 ---
 
-### Step 7 — Analytics integration (Google Firebase Analytics)
+### Step 7 — Network layer (Retrofit + OkHttp + Hilt)
 
-#### 7.1 — Prerequisites
+#### 7.1 — Scaffold `:core-network`
+
+Add to `settings.gradle.kts`:
+
+```kotlin
+include(":core-network")
+```
+
+**`core-network/build.gradle.kts`:**
+
+```kotlin
+plugins {
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.hilt)
+    alias(libs.plugins.ksp)
+}
+
+android {
+    namespace = "<package>.core.network"
+    compileSdk = libs.versions.compileSdk.get().toInt()
+    defaultConfig { minSdk = libs.versions.minSdk.get().toInt() }
+    buildTypes {
+        release { isMinifyEnabled = false }
+    }
+}
+
+dependencies {
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    implementation(platform(libs.okhttp.bom))
+    implementation(libs.okhttp.core)
+    implementation(libs.okhttp.logging)
+    implementation(libs.retrofit.core)
+    implementation(libs.retrofit.moshi)
+    implementation(libs.moshi.kotlin)
+    ksp(libs.moshi.codegen)
+    testImplementation(libs.junit5.api)
+    testImplementation(libs.mockk)
+}
+```
+
+Feature modules consume it as:
+
+```kotlin
+// feature/<name>/build.gradle.kts
+dependencies {
+    implementation(project(":core-network"))
+}
+```
+
+#### 7.2 — Network response wrapper
+
+**`NetworkResponse.kt`** — sealed class that wraps every API result:
+
+```kotlin
+sealed class NetworkResponse<out T> {
+    data class Success<T>(val data: T) : NetworkResponse<T>()
+    data class Error(
+        val code: Int,
+        val message: String,
+    ) : NetworkResponse<Nothing>()
+    data class Exception(val throwable: Throwable) : NetworkResponse<Nothing>()
+}
+
+suspend fun <T> safeApiCall(call: suspend () -> T): NetworkResponse<T> = try {
+    NetworkResponse.Success(call())
+} catch (e: HttpException) {
+    NetworkResponse.Error(e.code(), e.message())
+} catch (e: Throwable) {
+    NetworkResponse.Exception(e)
+}
+```
+
+#### 7.3 — Auth interceptor
+
+**`AuthInterceptor.kt`** — adds `Authorization` header to every request:
+
+```kotlin
+class AuthInterceptor @Inject constructor(
+    private val tokenProvider: TokenProvider,   // injected via Hilt
+) : Interceptor {
+
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request().newBuilder()
+            .addHeader("Authorization", "Bearer ${tokenProvider.getToken()}")
+            .build()
+        return chain.proceed(request)
+    }
+}
+
+interface TokenProvider {
+    fun getToken(): String
+}
+```
+
+#### 7.4 — Retrofit API service
+
+**`ApiService.kt`** — every endpoint is a `suspend` function:
+
+```kotlin
+interface ApiService {
+
+    @GET("v1/items")
+    suspend fun getItems(): List<ItemDto>
+
+    @GET("v1/items/{id}")
+    suspend fun getItem(@Path("id") id: String): ItemDto
+
+    @POST("v1/items")
+    suspend fun createItem(@Body request: CreateItemRequest): ItemDto
+
+    @PUT("v1/items/{id}")
+    suspend fun updateItem(
+        @Path("id") id: String,
+        @Body request: UpdateItemRequest,
+    ): ItemDto
+
+    @DELETE("v1/items/{id}")
+    suspend fun deleteItem(@Path("id") id: String): Response<Unit>
+}
+```
+
+Use `@JsonClass(generateAdapter = true)` on every DTO:
+
+```kotlin
+@JsonClass(generateAdapter = true)
+data class ItemDto(
+    @Json(name = "id") val id: String,
+    @Json(name = "name") val name: String,
+    @Json(name = "created_at") val createdAt: String,
+)
+```
+
+#### 7.5 — Hilt NetworkModule
+
+**`di/NetworkModule.kt`:**
+
+```kotlin
+@Module
+@InstallIn(SingletonComponent::class)
+object NetworkModule {
+
+    @Provides
+    @Singleton
+    fun provideOkHttpClient(
+        authInterceptor: AuthInterceptor,
+    ): OkHttpClient = OkHttpClient.Builder()
+        .addInterceptor(authInterceptor)
+        .addInterceptor(
+            HttpLoggingInterceptor().apply {
+                level = if (BuildConfig.DEBUG)
+                    HttpLoggingInterceptor.Level.BODY
+                else
+                    HttpLoggingInterceptor.Level.NONE
+            }
+        )
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    @Provides
+    @Singleton
+    fun provideMoshi(): Moshi = Moshi.Builder()
+        .addLast(KotlinJsonAdapterFactory())
+        .build()
+
+    @Provides
+    @Singleton
+    fun provideRetrofit(
+        okHttpClient: OkHttpClient,
+        moshi: Moshi,
+    ): Retrofit = Retrofit.Builder()
+        .baseUrl(BuildConfig.BASE_URL)
+        .client(okHttpClient)
+        .addConverterFactory(MoshiConverterFactory.create(moshi))
+        .build()
+
+    @Provides
+    @Singleton
+    fun provideApiService(retrofit: Retrofit): ApiService =
+        retrofit.create(ApiService::class.java)
+}
+```
+
+Add `BASE_URL` to `app/build.gradle.kts`:
+
+```kotlin
+android {
+    defaultConfig {
+        buildConfigField("String", "BASE_URL", "\"https://api.example.com/\"")
+    }
+    buildFeatures { buildConfig = true }
+}
+```
+
+#### 7.6 — Repository implementation
+
+Repository implementations in `shared/data/` call `safeApiCall` and map DTOs to domain models:
+
+```kotlin
+class ItemRepositoryImpl @Inject constructor(
+    private val apiService: ApiService,
+    @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
+) : ItemRepository {
+
+    override suspend fun getItems(): Result<List<Item>> =
+        withContext(ioDispatcher) {
+            when (val response = safeApiCall { apiService.getItems() }) {
+                is NetworkResponse.Success  -> Result.success(response.data.map { it.toDomain() })
+                is NetworkResponse.Error    -> Result.failure(ApiException(response.code, response.message))
+                is NetworkResponse.Exception -> Result.failure(response.throwable)
+            }
+        }
+}
+
+// Bind in AppModule:
+@Binds @Singleton
+abstract fun bindItemRepository(impl: ItemRepositoryImpl): ItemRepository
+```
+
+#### 7.7 — Testing pattern
+
+Mock `ApiService` directly — no HTTP server needed:
+
+```kotlin
+class ItemRepositoryTest {
+
+    private val apiService: ApiService = mockk()
+    private val repository = ItemRepositoryImpl(apiService, UnconfinedTestDispatcher())
+
+    @Test
+    fun `getItems returns Success when api call succeeds`() = runTest {
+        val dtos = listOf(ItemDto("1", "Test", "2025-01-01"))
+        coEvery { apiService.getItems() } returns dtos
+
+        val result = repository.getItems()
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(result.getOrNull()).hasSize(1)
+    }
+
+    @Test
+    fun `getItems returns Failure when api throws`() = runTest {
+        coEvery { apiService.getItems() } throws IOException("no network")
+
+        val result = repository.getItems()
+
+        assertThat(result.isFailure).isTrue()
+    }
+}
+```
+
+---
+
+### Step 8 — Analytics integration (Google Firebase Analytics)
+
+#### 8.1 — Prerequisites
 
 1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com).
 2. Register the Android app using the `applicationId` from `app/build.gradle.kts`.
 3. Download `google-services.json` and place it at `app/google-services.json`.
    > `google-services.json` contains no secrets — it is safe to commit.
 
-#### 7.2 — Apply the Google Services plugin
+#### 8.2 — Apply the Google Services plugin
 
 `app/build.gradle.kts`:
 
@@ -568,7 +844,7 @@ plugins {
 }
 ```
 
-#### 7.3 — Scaffold `:core-analytics`
+#### 8.3 — Scaffold `:core-analytics`
 
 Add to `settings.gradle.kts`:
 
@@ -600,7 +876,7 @@ dependencies {
 }
 ```
 
-#### 7.4 — Analytics domain model
+#### 8.4 — Analytics domain model
 
 **`AnalyticsEvent.kt`** — sealed class; every trackable event is a subtype:
 
@@ -656,7 +932,7 @@ interface AnalyticsTracker {
 }
 ```
 
-#### 7.5 — Firebase implementation
+#### 8.5 — Firebase implementation
 
 **`FirebaseAnalyticsTracker.kt`:**
 
@@ -690,7 +966,7 @@ class FirebaseAnalyticsTracker @Inject constructor(
 }
 ```
 
-#### 7.6 — Hilt module
+#### 8.6 — Hilt module
 
 **`di/AnalyticsModule.kt`:**
 
@@ -713,7 +989,7 @@ object AnalyticsModule {
 }
 ```
 
-#### 7.7 — Usage in a ViewModel
+#### 8.7 — Usage in a ViewModel
 
 Add `:core-analytics` as a dependency in any feature module, then inject:
 
@@ -754,7 +1030,7 @@ class <Name>ViewModel @Inject constructor(
 }
 ```
 
-#### 7.8 — Testing pattern
+#### 8.8 — Testing pattern
 
 Use `mockk(relaxed = true)` — no Firebase SDK needed in unit tests:
 
@@ -795,7 +1071,7 @@ class <Name>ViewModelTest {
 
 ---
 
-### Step 8 — Non-negotiables (apply to every PR in this project)
+### Step 9 — Non-negotiables (apply to every PR in this project)
 
 - No business logic in `@Composable` functions — only in ViewModels or UseCases.
 - No `GlobalScope`. Always `viewModelScope` or `lifecycleScope` or injected `CoroutineScope`.
@@ -808,6 +1084,11 @@ class <Name>ViewModelTest {
 - Every new `:ui-toolkit` component must have Compose UI tests.
 - Test tags defined in a constants object — never inline strings in test assertions.
 - `shared/domain/` must have zero Android imports.
+- All API calls must go through `ApiService` — never use `OkHttpClient` directly in business code.
+- Always wrap API calls with `safeApiCall { }` — never let exceptions propagate uncaught.
+- Every DTO must be annotated with `@JsonClass(generateAdapter = true)`.
+- Never put `BASE_URL` in source code — always use `BuildConfig.BASE_URL`.
+- Logging interceptor must be `Level.NONE` in release builds.
 - Every screen view must fire `AnalyticsEvent.ScreenView` on ViewModel init.
 - Every user action (button tap, form submit, retry) must fire an `AnalyticsEvent`.
 - Never call `FirebaseAnalytics` directly from ViewModels or Composables — always inject `AnalyticsTracker`.
@@ -816,7 +1097,7 @@ class <Name>ViewModelTest {
 
 ---
 
-### Step 9 — Write CLAUDE.md at the project root
+### Step 10 — Write CLAUDE.md at the project root
 
 Create `CLAUDE.md` at the project root. This file is auto-loaded by Claude Code
 in every session, ensuring all agents follow the same architecture without being
@@ -833,6 +1114,7 @@ Clean layered architecture with MVVM, Jetpack Compose, Kotlin Multiplatform.
 - `feature/<name>/` — One module per feature. Compose UI + ViewModel only.
 - `app/` — DI wiring, navigation host, entry point only.
 - `:ui-toolkit` — local design system module. Never a separate dependency.
+- `:core-network` — Retrofit + OkHttp client, `ApiService`, `NetworkResponse` wrapper, Hilt bindings.
 - `:core-analytics` — Google Firebase Analytics wrapper. All event tracking goes through `AnalyticsTracker`.
 
 ### Layer rules
@@ -850,6 +1132,13 @@ Clean layered architecture with MVVM, Jetpack Compose, Kotlin Multiplatform.
 - `shared/domain/` must have zero Android imports.
 - Never call `FirebaseAnalytics` directly — always inject `AnalyticsTracker`.
 - Never hardcode analytics event names — always use `AnalyticsEvent` subtypes.
+
+## Network
+- All API calls go through `ApiService` (Retrofit interface injected via Hilt).
+- Wrap every call with `safeApiCall { }` — never let exceptions escape unchecked.
+- DTOs use `@JsonClass(generateAdapter = true)` + `@Json(name = ...)` for field mapping.
+- `BASE_URL` comes from `BuildConfig` — never hardcoded.
+- `HttpLoggingInterceptor` is `Level.NONE` in release builds.
 
 ## Analytics
 - Every screen view fires `AnalyticsEvent.ScreenView` in ViewModel init.
@@ -877,7 +1166,7 @@ Use `specs/template.md` as the base. Get spec approved before writing code.
 
 ---
 
-### Step 10 — Create Progress.md
+### Step 11 — Create Progress.md
 
 Create `Progress.md` at the project root:
 
@@ -908,7 +1197,7 @@ Create `Progress.md` at the project root:
 
 ---
 
-### Step 11 — Create plan/ structure
+### Step 12 — Create plan/ structure
 
 ```
 plan/
@@ -970,7 +1259,7 @@ _Copy Phase 1 block for each additional phase._
 
 ---
 
-### Step 12 — Create specs/ structure
+### Step 13 — Create specs/ structure
 
 ```
 specs/
