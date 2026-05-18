@@ -51,26 +51,24 @@ separate repository publishable as a Gradle dependency.
 └── build.gradle.kts
 ```
 
-### 2. UI Toolkit repository (separate)
+### 2. `:ui-toolkit` module (local, inside this project)
 
 ```
-<project-name>-ui-toolkit/
-├── toolkit/                            # Library module
-│   ├── src/main/kotlin/.../
-│   │   ├── tokens/                    # Design tokens
-│   │   │   ├── Color.kt
-│   │   │   ├── Typography.kt
-│   │   │   └── Spacing.kt
-│   │   ├── theme/
-│   │   │   └── AppTheme.kt
-│   │   └── components/                # One file per component
-│   │       ├── Button.kt
-│   │       ├── TextField.kt
-│   │       └── ...
-│   └── src/androidTest/kotlin/        # Compose UI tests for every component
-├── catalog/                            # Optional: Compose component catalog app
-├── gradle/libs.versions.toml
-└── settings.gradle.kts
+ui-toolkit/
+├── build.gradle.kts
+└── src/
+    ├── main/kotlin/.../ui/toolkit/
+    │   ├── tokens/                    # Design tokens
+    │   │   ├── Color.kt
+    │   │   ├── Typography.kt
+    │   │   └── Spacing.kt
+    │   ├── theme/
+    │   │   └── AppTheme.kt
+    │   └── components/                # One file per component
+    │       ├── Button.kt
+    │       ├── TextField.kt
+    │       └── ...
+    └── androidTest/kotlin/            # Compose UI tests for every component
 ```
 
 ---
@@ -82,8 +80,6 @@ Ask if not provided:
 - **Project name** — used for package name, repo name, module names.
 - **Package name** — e.g. `com.example.myapp`.
 - **Root directory** — where to create the project folders.
-- **UI Toolkit** — create the ui-toolkit repo now, or scaffold placeholder only?
-- **Publish target** — GitHub Packages (default) or Maven Local only?
 - **iOS target** — include KMP iOS source sets? (default: no, add later)
 
 ---
@@ -420,43 +416,53 @@ class <Name>ScreenTest {
 
 ---
 
-### Step 5 — Scaffold the UI Toolkit repository
+### Step 5 — Scaffold the `:ui-toolkit` local module
 
-Create as a **separate git repository**: `<project-name>-ui-toolkit`.
+Create `ui-toolkit/` as a local Android library module **inside the project**. Add it to
+`settings.gradle.kts` — no separate repo, no publishing, no GitHub Packages.
 
 ```kotlin
-// toolkit/build.gradle.kts
+// settings.gradle.kts  (add to the include list)
+include(":ui-toolkit")
+```
+
+```kotlin
+// ui-toolkit/build.gradle.kts
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
-    `maven-publish`
 }
 
-publishing {
-    publications {
-        create<MavenPublication>("release") {
-            groupId = "com.<yourname>"
-            artifactId = "<project-name>-ui-toolkit"
-            version = "1.0.0"
-            afterEvaluate { from(components["release"]) }
-        }
-    }
-    repositories {
-        maven {
-            name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/<github-username>/<project-name>-ui-toolkit")
-            credentials {
-                username = System.getenv("GITHUB_ACTOR")
-                password = System.getenv("GITHUB_TOKEN")
-            }
-        }
-    }
+android {
+    namespace = "<package>.ui.toolkit"
+    compileSdk = libs.versions.compileSdk.get().toInt()
+    defaultConfig { minSdk = libs.versions.minSdk.get().toInt() }
+}
+
+dependencies {
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material3)
+    debugImplementation(libs.compose.ui.tooling)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
+}
+```
+
+Feature modules consume it as a local project dependency:
+
+```kotlin
+// feature/<name>/build.gradle.kts
+dependencies {
+    implementation(project(":ui-toolkit"))
 }
 ```
 
 **Component rules:**
-- One file per component under `toolkit/src/main/kotlin/.../components/`.
+- One file per component under `ui-toolkit/src/main/kotlin/.../components/`.
 - Every component is stateless — takes lambdas for callbacks, no ViewModel dependency.
 - Every component has a preview (`@Preview`) AND a Compose UI test.
 - Components expose a `modifier: Modifier = Modifier` parameter as the last parameter.
@@ -507,49 +513,6 @@ class AppButtonTest {
 }
 ```
 
-**Publishing workflow (GitHub Actions):**
-```yaml
-# .github/workflows/publish.yml
-name: Publish
-on:
-  push:
-    tags: [ 'v*' ]
-jobs:
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with: { java-version: '17', distribution: 'temurin' }
-      - run: ./gradlew :toolkit:publishReleasePublicationToGitHubPackagesRepository
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-**Consuming the toolkit in the main project:**
-
-```kotlin
-// settings.gradle.kts
-dependencyResolutionManagement {
-    repositories {
-        maven {
-            url = uri("https://maven.pkg.github.com/<github-username>/<project-name>-ui-toolkit")
-            credentials {
-                username = providers.gradleProperty("github.actor").orNull ?: System.getenv("GITHUB_ACTOR")
-                password = providers.gradleProperty("github.token").orNull ?: System.getenv("GITHUB_TOKEN")
-            }
-        }
-    }
-}
-```
-
-```toml
-# gradle/libs.versions.toml
-[libraries]
-ui-toolkit = { group = "com.<yourname>", name = "<project-name>-ui-toolkit", version = "1.0.0" }
-```
-
 ---
 
 ### Step 6 — DI wiring (Hilt)
@@ -575,11 +538,11 @@ object DispatcherModule {
 - No `GlobalScope`. Always `viewModelScope` or `lifecycleScope` or injected `CoroutineScope`.
 - No `!!` operators.
 - No hardcoded strings in UI — use string resources.
-- No hardcoded colors or dimensions — use design tokens from ui-toolkit.
+- No hardcoded colors or dimensions — use design tokens from `:ui-toolkit`.
 - Every new screen must have Compose UI tests covering all UiState branches + corner cases.
 - Every new UseCase must have a unit test in `commonTest`.
 - Every new ViewModel must have unit tests for every state transition.
-- Every new ui-toolkit component must have Compose UI tests.
+- Every new `:ui-toolkit` component must have Compose UI tests.
 - Test tags defined in a constants object — never inline strings in test assertions.
 - `shared/domain/` must have zero Android imports.
 
@@ -601,7 +564,7 @@ Clean layered architecture with MVVM, Jetpack Compose, Kotlin Multiplatform.
 - `shared/` — KMP. All business logic. Zero Android imports in `domain/`.
 - `feature/<name>/` — One module per feature. Compose UI + ViewModel only.
 - `app/` — DI wiring, navigation host, entry point only.
-- `ui-toolkit` — imported as Gradle dependency from separate repo.
+- `ui-toolkit` — local module (`:ui-toolkit`) inside this project. Never a separate dependency.
 
 ### Layer rules
 - `domain/` — Pure Kotlin. Repository interfaces only. No implementations.
@@ -614,14 +577,14 @@ Clean layered architecture with MVVM, Jetpack Compose, Kotlin Multiplatform.
 - No `GlobalScope` — use `viewModelScope`, `lifecycleScope`, or injected scope.
 - No `!!` operators.
 - No hardcoded strings — use string resources.
-- No hardcoded colors or dimensions — use design tokens from ui-toolkit.
+- No hardcoded colors or dimensions — use design tokens from `:ui-toolkit`.
 - `shared/domain/` must have zero Android imports.
 
 ## Testing requirements
 - Every screen: Compose UI tests for all UiState branches + corner cases.
 - Every ViewModel: unit tests for every state transition.
 - Every UseCase: unit test in `commonTest`.
-- Every ui-toolkit component: Compose UI test.
+- Every `:ui-toolkit` component: Compose UI test.
 - Test tags in constants objects — never inline strings in tests.
 - Use Turbine for Flow testing, MockK for mocking, coroutines-test for dispatchers.
 
