@@ -231,7 +231,13 @@ For multi-module and monorepo projects, each row also shows the module/subprojec
   4  [PLAN: draft]    onboarding-redesign (:feature-onboarding)  not started
   5  [BLOCKED]        push-notifications (:core-push)    waiting on backend contract
 
-  Enter task number · module name to filter · [b] back · [r] refresh
+  ── Commands ──────────────────────────────────────────────────
+  [b]        Back to dashboard
+  [r]        Refresh (re-read project files)
+  [remove]   Remove this project from the registry
+  [?]        Help
+
+  Enter a task number, module name to filter, or a command:
 ```
 
 **Monorepo:**
@@ -252,7 +258,13 @@ For multi-module and monorepo projects, each row also shows the module/subprojec
   2  [SPEC: approved] driver-onboarding [driver-app]  ready to implement
   3  [PLAN: draft]    auth-refresh [shared-lib]        plan written, not started
 
-  Enter task number · subproject name to filter · [b] back · [r] refresh
+  ── Commands ──────────────────────────────────────────────────
+  [b]        Back to dashboard
+  [r]        Refresh (re-read project files)
+  [remove]   Remove this project from the registry
+  [?]        Help
+
+  Enter a task number, subproject name to filter, or a command:
 ```
 
 Wait for user input.
@@ -329,7 +341,7 @@ I want to implement a feature using spec-driven development.
 
 Project root: <abs_path>                   ← subproject root for monorepos
 Spec: specs/features/<slug>/spec.md  (status: approved)
-Plan: plan/features/<slug>.md
+Plan: plan/index.md  (row: <slug>, status: approved)
 Module: <:module-name or "—">              ← primary Gradle module affected
 
 Read .agents/skills/android-sdd/SKILL.md and follow MODE: IMPLEMENT with:
@@ -395,7 +407,7 @@ I want to start implementing a planned feature, but I need a spec first.
 
 Project root: <abs_path>
 Feature: <feature name>
-Plan: plan/features/<slug>.md  (status: draft)
+Plan: plan/index.md  (row: <slug>, status: draft)
 
 Read .agents/skills/android-sdd/SKILL.md and follow MODE: SPEC with:
   feature: <feature name from plan>
