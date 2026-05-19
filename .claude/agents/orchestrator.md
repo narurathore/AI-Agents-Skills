@@ -39,7 +39,10 @@ Create this file and its parent directory if they do not exist.
 @orchestrator                          → open dashboard (default)
 @orchestrator add <path>               → register a project or monorepo
 @orchestrator remove <name-or-number>  → deregister a project
-@orchestrator refresh                  → re-read all project files and redisplay
+@orchestrator refresh                  → re-read all project files, run PR-merge check, redisplay
+@orchestrator init-ledger <project>    → create .orchestrator/tasks.md for a project
+@orchestrator ledger <project>         → print the raw task ledger for a project
+@orchestrator reconcile <project>      → PR-fallback scan; propose ledger fixes for approval
 ```
 
 After the dashboard loads the user types a project number to drill in.
@@ -159,6 +162,10 @@ Look up the project row in the registry. Check its `Structure` field:
 ### Step 2A — Read files (single / multi-module)
 
 Read from the project root:
+- `.orchestrator/tasks.md` — the task ledger (full file). See **Task Ledger
+  & Completion Protocol** section below. If present, the ledger is the
+  PRIMARY source of pending tasks and supersedes the Progress.md / plan
+  scanning for task status. Run the PR-merge check on `pr-raised` rows here.
 - `Progress.md` (full file)
 - `plan/index.md` (full file)
 - `specs/features/*/spec.md` and `specs/bugs/*/spec.md` (status + title only)
@@ -178,13 +185,19 @@ it affects by:
 ### Step 2B — Read files (monorepo)
 
 Read the subproject list from the registry's Modules section.
-For each subproject, read (if exists):
+For monorepos, look for the ledger at the **monorepo root** first
+(`<monorepo_root>/.orchestrator/tasks.md`) — this is the canonical location
+for cross-subproject tasks. Optionally also read per-subproject ledgers at
+`<subproject>/.orchestrator/tasks.md` if they exist.
+
+Then for each subproject, read (if exists):
 - `<subproject>/Progress.md`
 - `<subproject>/plan/index.md`
 - `<subproject>/specs/features/*/spec.md`
 - `<subproject>/git -C <subproject> branch --show-current`
 
-Tag every task with the subproject name it came from.
+Tag every task with the subproject name it came from (read from the
+ledger's optional `Module` column, or inferred from Progress.md location).
 
 ### Step 3 — Build the task list
 
@@ -325,6 +338,10 @@ Print:
   ── Paste this into the new session ────────────────────
 
 <exact prompt text in a fenced block — see format below>
+
+<COMPLETION PROTOCOL FOOTER — see Task Ledger section. Mandatory unless the
+ledger row has `No-PR: yes`. Always include this footer in every generated
+session prompt.>
 
   ───────────────────────────────────────────────────────
   [b] Back to project  [d] Back to dashboard
@@ -580,6 +597,157 @@ Triggered by `@orchestrator remove <name-or-number>`.
 
 ---
 
+## Task Ledger & Completion Protocol
+
+Each registered project SHOULD maintain a task ledger at:
+
+```
+<project_root>/.orchestrator/tasks.md
+```
+
+For monorepos, the ledger lives at the monorepo root and may include a
+`Module` column to tag the subproject each task belongs to.
+
+The ledger is the durable, cross-session source of truth for task state. The
+orchestrator reads it on every dashboard render and uses it to filter
+pending work. Sessions update it on completion. The orchestrator only writes
+to the ledger when auto-promoting `pr-raised` → `merged` after a PR merge
+check (see Refresh logic below).
+
+If a project has no `.orchestrator/` directory, the orchestrator falls back
+to reading `Progress.md` / `plan/index.md` (legacy behaviour). It does not
+auto-create the ledger — that is the user's choice via `@orchestrator
+init-ledger <project>`.
+
+### Ledger format
+
+````markdown
+# Task Ledger — <Project Name>
+
+_Last updated: YYYY-MM-DD_
+
+## Status legend
+
+- `pending`     — not yet started
+- `in-progress` — a session is actively working on it
+- `pr-raised`   — PR opened, waiting for review/merge
+- `merged`      — PR merged (orchestrator auto-promotes from pr-raised)
+- `done`        — completed without a PR (only valid when No-PR: yes)
+- `cancelled`   — abandoned; subsumed by another task or no longer needed
+
+## Tasks
+
+| ID | Subject                              | Module        | Status   | PR  | Branch | No-PR | Updated    |
+|----|--------------------------------------|---------------|----------|-----|--------|-------|------------|
+| 1  | Audit backend Cloud Functions        | backend       | pending  | —   | —      | no    | 2026-05-19 |
+| 2  | Patch system-design.md gaps          | —             | pending  | —   | —      | no    | 2026-05-19 |
+| 23 | Update orchestrator agent definition | —             | pending  | —   | —      | yes   | 2026-05-19 |
+````
+
+Column semantics:
+- **Module** — optional. For monorepos, tag the subproject (e.g. `backend`,
+  `androidKidApp`). Use `—` for cross-cutting tasks. Single-project repos
+  can omit this column entirely.
+- **No-PR** — `yes` for tasks that don't require a PR (e.g. work outside any
+  git project, or destructive operations where direct commits are agreed
+  with the user). Default is `no` — a PR is required.
+
+### Completion protocol footer (mandatory in every session prompt)
+
+Every session prompt generated by Mode 3 MUST end with this footer, with
+`<N>`, `<project_root>`, and `<subject>` filled in:
+
+````
+---
+
+## Completion Protocol (mandatory — do not skip this section)
+
+This task is NOT complete until ALL applicable items below are done.
+
+### 1. Update the ledger
+File: <project_root>/.orchestrator/tasks.md
+Action: locate the row for Task <N> and update the cells:
+  Status:  → `pr-raised`  (if a PR was opened)
+           → `done`       (ONLY if the row's No-PR column is `yes`)
+  PR:      <PR URL or commit SHA>
+  Branch:  <branch name, or `—` for no-PR tasks committed direct to main>
+  Updated: <today's date YYYY-MM-DD>
+
+Use the Edit tool to change the row cleanly. Preserve all other rows.
+
+### 2. Open a PR  (skip if this row has No-PR: yes)
+- Push your branch and open a PR from it to the agreed base (default: main).
+- PR title format: `[task-<N>] <subject>`
+- PR body MUST include this line verbatim on its own line:
+      Task-ID: <N>
+- Commit the ledger update on the same branch so it lands with the PR merge.
+
+### 3. After the PR merges (automatic)
+On the next `@orchestrator refresh`, the orchestrator detects merged PRs by
+running `gh pr view <PR#> --json state,mergedAt` for every `pr-raised` row
+and auto-promotes the status to `merged`. You do not need to update the
+ledger again.
+
+### If this session cannot complete the task
+Set Status to `in-progress`, append a parenthetical blocker note to the
+Subject column (e.g. `(blocked: waiting on design review)`), and commit
+so the next session sees it.
+````
+
+### Refresh logic with PR fallback
+
+When `@orchestrator refresh` runs, for each project that has
+`.orchestrator/tasks.md`:
+
+1. **Read the ledger.**
+2. **PR-merge check.** For each row with `Status: pr-raised` and a PR URL
+   or number, run:
+   ```bash
+   gh pr view <PR#> --repo <owner/repo> --json state,mergedAt
+   ```
+   If `state == "MERGED"`, rewrite that row to `Status: merged` and bump
+   the `Updated` column to today. This is the only write the orchestrator
+   performs on the ledger during a normal refresh.
+3. **Fallback scan** (catches sessions that opened a PR but forgot to
+   update the ledger). Run:
+   ```bash
+   gh pr list --state all --search "Task-ID: in:body" --limit 100 \
+     --json number,title,body,state,mergedAt,url,headRefName
+   ```
+   For each result, parse `Task-ID:\s*(\d+)` from the body. If that ID
+   exists in the ledger but the ledger status disagrees with PR state,
+   surface a `⚠ ledger-PR mismatch` warning in the dashboard and propose
+   the fix on `@orchestrator reconcile`.
+4. **Render** the dashboard, filtering out `merged`, `done`, and
+   `cancelled` rows from the pending count.
+
+### `init-ledger` mode
+
+`@orchestrator init-ledger <project>`:
+1. Verify the project exists in the registry.
+2. Check that `<project_root>/.orchestrator/tasks.md` does NOT exist.
+3. Read existing `Progress.md` / `plan/index.md` (and any monorepo
+   subprojects). Propose an initial task list to the user with status
+   `pending` for everything not already marked done.
+4. On user approval, write the ledger and create `.orchestrator/.gitkeep`.
+
+### `reconcile` mode
+
+`@orchestrator reconcile <project>`:
+1. Run the full fallback scan.
+2. For each mismatch, show: ledger row vs PR state.
+3. Ask the user per row: accept proposed fix / skip / mark cancelled.
+4. Apply only approved fixes.
+
+### Concurrency
+
+The ledger is a single file. Parallel sessions racing on the same ledger
+will conflict. Recommended: one task per branch at a time. If two sessions
+must run in parallel, they should claim different rows and commit ledger
+edits to different branches.
+
+---
+
 ## Rules
 
 - Never modify any file inside a registered project — the orchestrator is
@@ -598,3 +766,15 @@ Triggered by `@orchestrator remove <name-or-number>`.
   so the user can `cd` there directly.
 - Paused and archived projects are shown in the dashboard but their tasks are
   not expanded by default. The user can still select them.
+- Every session prompt generated in Mode 3 MUST include the **Completion
+  Protocol footer** from the Task Ledger section, with task ID, project
+  root, and subject substituted in. The only exception is when the ledger
+  row has `No-PR: yes` AND the session is purely informational (e.g. a
+  read-only review). When in doubt, include the footer.
+- The orchestrator MAY write to `<project_root>/.orchestrator/tasks.md`
+  ONLY to auto-promote `pr-raised` → `merged` after verifying the PR is
+  merged via `gh pr view`. All other ledger edits are the responsibility
+  of the session that did the work.
+- If `gh` is not authenticated or the project has no GitHub remote,
+  skip the PR-merge check and the fallback scan; show a one-line warning
+  in the dashboard footer: `⚠ gh unavailable — ledger trusted as-is`.
